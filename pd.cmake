@@ -73,7 +73,7 @@ function(add_pd_external PROJECT_NAME EXTERNAL_NAME EXTERNAL_SOURCES)
 	endif()
 
 	# Generate the function to export for Windows
-	if(${WIN32} AND MSVC)
+	if(WIN32 AND MSVC)
 		if(NAME_HAS_DOT EQUAL -1)
 			string(REPLACE "~" "_tilde" EXPORT_FUNCTION "${EXTERNAL_NAME}_setup")
 		else()
