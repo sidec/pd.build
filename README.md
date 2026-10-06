@@ -159,3 +159,26 @@ Coming soon...
 
 * [pd-lib-builder](https://github.com/pure-data/pd-lib-builder)
 * [deken](https://github.com/pure-data/deken)
+
+## Regenerating the vendored import libraries
+
+`x64/pd.lib`, `x64/pd.def`, `x86/pd.lib`, and `x86/pd.def` are derived from
+the official Pd Windows binaries by the `regenerate import libraries`
+workflow (`.github/workflows/regenerate.yml`), not edited by hand. The
+workflow downloads the pinned zips, verifies their SHA-256, parses the
+`pd.dll` export tables (stdlib-only Python), and rebuilds the `.lib` files
+with MSVC `lib.exe`. It commits only when the `.def` files change.
+
+Current pins (Pd 0.57-0 — keep in sync with the `pure-data` pin of every
+consumer, e.g. pd-faustgen):
+
+| archive | URL | SHA-256 |
+| --- | --- | --- |
+| x64 | `https://msp.ucsd.edu/Software/pd-0.57-0.msw.zip` | `1c128583e9bb78c42c88af72e02951d3808af6598a0a68abf0eda61e8d2bc4a3` |
+| x86 | `https://msp.ucsd.edu/Software/pd-0.57-0-i386.msw.zip` | `7b6057367172fe96cf3652c67bbcf2a4755d2514135b09a6eea7cd9dd9781eff` |
+
+**Bump ritual on a new Pd version:** update both URLs and checksums in the
+workflow (checksums via `sha256sum` of the downloaded zips), verify the
+archive layout still matches `<pd-version>/bin/pd.dll`, dispatch the
+workflow, and confirm the resulting commit's `x64/pd.def` contains the
+exports the consumers link against.
