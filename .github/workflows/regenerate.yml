@@ -1,0 +1,108 @@
+name: regenerate import libraries
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/regenerate.yml'
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  regenerate:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: fetch pd binaries
+        run: |
+          set -e
+          # Official Pd binaries matching pure-data 0.57-0; bump URLs + sha256
+          # together with the consumer's pure-data pin (see README).
+          curl -sSL --retry 3 -o pd64.zip https://msp.ucsd.edu/Software/pd-0.57-0.msw.zip
+          echo "1c128583e9bb78c42c88af72e02951d3808af6598a0a68abf0eda61e8d2bc4a3  pd64.zip" | sha256sum -c -
+          curl -sSL --retry 3 -o pd86.zip https://msp.ucsd.edu/Software/pd-0.57-0-i386.msw.zip
+          echo "7b6057367172fe96cf3652c67bbcf2a4755d2514135b09a6eea7cd9dd9781eff  pd86.zip" | sha256sum -c -
+          unzip -o -q pd64.zip 'pd-0.57-0/bin/pd.dll'
+          unzip -o -q pd86.zip 'pd-0.57-0-i386/bin/pd.dll'
+          rm pd64.zip pd86.zip
+
+      - name: generate def files
+        run: |
+          set -e
+          python - <<'PY'
+          import pathlib
+          import struct
+
+          def exports(path, expect_magic):
+              data = pathlib.Path(path).read_bytes()
+              e_lfanew, = struct.unpack_from('<I', data, 0x3c)
+              coff = e_lfanew + 4
+              nsec, = struct.unpack_from('<H', data, coff + 2)
+              optsz, = struct.unpack_from('<H', data, coff + 16)
+              opt = coff + 20
+              magic, = struct.unpack_from('<H', data, opt)
+              assert magic == expect_magic, (path, hex(magic))
+              # export-directory RVA: PE32 data dirs at +96, PE32+ at +112
+              exp_rva, = struct.unpack_from('<I', data, opt + {0x10b: 96, 0x20b: 112}[magic])
+              so = opt + optsz
+              secs = [struct.unpack_from('<IIII', data, so + i * 40 + 8) for i in range(nsec)]
+
+              def rva2off(rva):
+                  for vsz, va, rsz, raw in secs:
+                      if va <= rva < va + max(vsz, rsz):
+                          return raw + (rva - va)
+                  raise ValueError(hex(rva))
+
+              eo = rva2off(exp_rva)
+              nnames, = struct.unpack_from('<I', data, eo + 24)
+              names_off = rva2off(struct.unpack_from('<I', data, eo + 32)[0])
+              names = []
+              for i in range(nnames):
+                  nrva, = struct.unpack_from('<I', data, names_off + 4 * i)
+                  noff = rva2off(nrva)
+                  names.append(data[noff:data.index(b'\0', noff)].decode())
+              return names
+
+          x64 = exports('pd-0.57-0/bin/pd.dll', 0x20b)
+          x86 = exports('pd-0.57-0-i386/bin/pd.dll', 0x10b)
+          assert 'pdgui_vmess' in x64 and len(x64) > 2500, len(x64)
+          assert len(x86) > 1000, len(x86)
+          pathlib.Path('x64/pd.def').write_text('EXPORTS\n' + '\n'.join(x64) + '\n')
+          pathlib.Path('x86/pd.def').write_text('EXPORTS\n' + '\n'.join(x86) + '\n')
+          print('x64:', len(x64), 'exports; x86:', len(x86), 'exports')
+          PY
+
+      - name: import libraries
+        run: |
+          set -e
+          # lib.exe lives beside the toolchain VS ships; not on PATH.
+          vsinst=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | tr -d '\r')
+          test -n "$vsinst"
+          libexe=$(ls "$(cygpath -u "$vsinst")"/VC/Tools/MSVC/*/bin/Hostx64/x64/lib.exe | sort -V | tail -1)
+          test -f "$libexe"
+          export PATH="$(dirname "$libexe"):$PATH"
+          # MSYS2_ARG_CONV_EXCL stops bash from rewriting /def etc. as paths
+          MSYS2_ARG_CONV_EXCL='*' "$libexe" /def:x64/pd.def /machine:x64 /out:x64/pd.lib
+          MSYS2_ARG_CONV_EXCL='*' "$libexe" /def:x86/pd.def /machine:x86 /out:x86/pd.lib
+          test -s x64/pd.lib && test -s x86/pd.lib
+
+      - name: commit if changed
+        run: |
+          set -e
+          # Commit decision keyed on the .def files (text, deterministic):
+          # .lib bytes may drift with toolset timestamps.
+          if git diff --quiet -- x64/pd.def x86/pd.def; then
+            echo "no changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add x64/pd.def x64/pd.lib x86/pd.def x86/pd.lib
+          git commit -m "regenerate pd.lib/pd.def from official Pd 0.57-0 binaries"
+          git push
